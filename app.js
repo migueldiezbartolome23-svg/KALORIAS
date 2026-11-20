@@ -436,6 +436,7 @@ function render() {
   else if (tab === 'calendario') root.appendChild(renderCalendario());
   else if (tab === 'alimentos') root.appendChild(renderAlimentos());
   else if (tab === 'comidas') root.appendChild(renderComidas());
+  root.appendChild(renderVersionFooter());
   renderRacionesFab();
 }
 
@@ -1733,6 +1734,50 @@ function openEditMealModal(meal, onSaved) {
     }, isEdit ? 'Guardar cambios' : 'Guardar plato'));
   });
 }
+
+// ---------------- Actualizaciones de la app ----------------
+async function fetchLatestVersion() {
+  const r = await fetch('./version.js?t=' + Date.now(), { cache: 'no-store' });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const m = (await r.text()).match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+  if (!m) throw new Error('sin versión');
+  return m[1];
+}
+async function updateAppNow() {
+  try {
+    if ('serviceWorker' in navigator) (await navigator.serviceWorker.getRegistrations()).forEach(r => r.unregister());
+    if (window.caches) (await caches.keys()).forEach(k => caches.delete(k));
+  } catch (e) { console.warn(e); }
+  location.reload();
+}
+function showUpdateBanner(newVersion) {
+  if (document.getElementById('update-banner')) return;
+  const bar = el('div', { id: 'update-banner', class: 'update-banner' }, [
+    el('span', {}, `🆕 Hay una versión nueva (${newVersion})`),
+    el('button', { class: 'btn-primary', onclick: updateAppNow }, 'Actualizar')
+  ]);
+  document.body.appendChild(bar);
+}
+async function checkForUpdate(manual) {
+  try {
+    const latest = await fetchLatestVersion();
+    if (latest !== APP_VERSION) { showUpdateBanner(latest); return; }
+    if (manual) alertModal('Todo al día', `Ya tienes la última versión (${APP_VERSION}).`);
+  } catch (e) {
+    if (manual) alertModal('No se pudo comprobar', 'Revisa tu conexión a internet e inténtalo de nuevo.', 'warn');
+  }
+}
+function renderVersionFooter() {
+  return el('div', { class: 'version-footer' }, [
+    el('span', { class: 'note' }, `Versión ${APP_VERSION} · `),
+    el('button', { class: 'link-btn', onclick: () => checkForUpdate(true) }, 'Buscar actualización'),
+    el('span', { class: 'note' }, ' · '),
+    el('button', { class: 'link-btn', onclick: updateAppNow }, 'Forzar recarga')
+  ]);
+}
+checkForUpdate(false);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(false); });
+setInterval(() => checkForUpdate(false), 30 * 60 * 1000);
 
 // ---------------- Registro del Service Worker ----------------
 if ('serviceWorker' in navigator) {

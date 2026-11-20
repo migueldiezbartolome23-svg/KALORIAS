@@ -1,10 +1,11 @@
-const CACHE_NAME = 'kcalculadora-v11';
+const CACHE_NAME = 'kcalculadora-v12';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './data.js',
   './app.js',
+  './version.js',
   './firebase-config.js',
   './sync.js',
   './manifest.json',
