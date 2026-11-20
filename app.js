@@ -90,13 +90,15 @@ function persistUI() { saveJSON(STORAGE_KEYS.ui, state.ui); } // la navegación 
 function pushAllToCloud() {
   pushToCloud(() => ({
     profiles: JSON.stringify(state.profiles), ingredientsCatalog: JSON.stringify(state.ingredientsCatalog),
-    meals: JSON.stringify(state.meals), logs: JSON.stringify(state.logs), dataVersion: DATA_VERSION
+    meals: JSON.stringify(state.meals), dataVersion: DATA_VERSION,
+    // si este dispositivo no tiene registros todavía, no se sube un "vacío" que borraría los de la nube
+    ...(Object.keys(state.logs).length ? { logs: JSON.stringify(state.logs) } : {})
   }));
 }
 
 function applyRemoteChange(data) {
-  // datos de la nube anteriores a esta versión (con Marta y platos viejos): no los aplicamos, subimos los actuales
-  if ((data.dataVersion || 0) < DATA_VERSION) { pushAllToCloud(); return; }
+  // sin datos en la nube, o anteriores a esta versión (con Marta y platos viejos): subimos los actuales
+  if (!data || (data.dataVersion || 0) < DATA_VERSION) { pushAllToCloud(); applyPendingExercise(); return; }
   if (data.profiles) state.profiles = JSON.parse(data.profiles);
   if (data.ingredientsCatalog) state.ingredientsCatalog = JSON.parse(data.ingredientsCatalog);
   if (data.meals) state.meals = JSON.parse(data.meals);
@@ -111,7 +113,34 @@ function applyRemoteChange(data) {
   saveJSON(STORAGE_KEYS.catalog, state.ingredientsCatalog);
   saveJSON(STORAGE_KEYS.meals, state.meals);
   saveJSON(STORAGE_KEYS.logs, state.logs);
+  saveJSON(STORAGE_KEYS.version, DATA_VERSION);
   render();
+  applyPendingExercise();
+}
+
+// ---------- Ejercicio desde un enlace (Atajo de iOS con las calorías del Apple Watch) ----------
+// Uso:  https://TU-WEB/?ejercicio=650            (hoy)
+//       https://TU-WEB/?ejercicio=650&fecha=2026-11-20
+let pendingExercise = null;
+(function readExerciseFromURL() {
+  try {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('ejercicio')) return;
+    const kcal = Math.round(Number(String(params.get('ejercicio')).replace(',', '.')));
+    const fecha = /^\d{4}-\d{2}-\d{2}$/.test(params.get('fecha') || '') ? params.get('fecha') : todayISO();
+    if (kcal >= 0 && kcal < 10000) pendingExercise = { kcal, fecha };
+    history.replaceState(null, '', location.pathname); // limpia la URL para no repetirlo al recargar
+  } catch (e) { console.error(e); }
+})();
+function applyPendingExercise() {
+  if (!pendingExercise) return;
+  const { kcal, fecha } = pendingExercise;
+  pendingExercise = null;
+  getDayLog('miguel', fecha, state.profiles.miguel).ejercicio = kcal;
+  persistLogs();
+  state.ui.activeDate = fecha; persistUI();
+  render();
+  alertModal('Ejercicio guardado', `${kcal} kcal de ejercicio apuntadas para ${friendlyDateLabel(fecha).toLowerCase()}.`);
 }
 
 // ---------- Utilidades ----------
@@ -176,6 +205,12 @@ function calcSuggestedTarget(profile) {
   return { kcal: round1(kcal), prot, carb: round1(carb), fat, maintenance: round1(maint) };
 }
 function getEffectiveTarget(profile) { return profile.manualTarget || calcSuggestedTarget(profile); }
+// Objetivo de un día concreto: las kcal de ejercicio (Apple Watch o a mano) se suman a las calorías del día
+function dayTargetFor(profile, dayLog) {
+  const t = getEffectiveTarget(profile);
+  if (!t) return t;
+  return { ...t, kcal: t.kcal + ((dayLog && dayLog.ejercicio) || 0) };
+}
 
 const MEAL_KEYS = ['almuerzo', 'comida', 'merienda', 'cena'];
 const MEAL_TAG_LABELS = { almuerzo: 'Almuerzo', comida: 'Comida', merienda: 'Merienda', cena: 'Cena' };
@@ -488,16 +523,28 @@ function renderHoy() {
 
   const dayLog = getDayLog(profile.id, state.ui.activeDate, profile);
   const totals = dayTotals(dayLog, profile);
-  const target = getEffectiveTarget(profile);
+  const target = dayTargetFor(profile, dayLog);
 
   wrap.appendChild(renderProgressRings(totals, target));
   wrap.appendChild(renderCounterBoard(totals, target));
+  wrap.appendChild(renderExerciseCard(dayLog, target));
   for (const mk of MEAL_KEYS) wrap.appendChild(renderMealSection(profile, mk, dayLog));
   profile.extraMealSlots.forEach(slot => wrap.appendChild(renderMealSection(profile, slot.id, dayLog, slot.name)));
   wrap.appendChild(renderAddMealSlotCard(profile));
   wrap.appendChild(renderBebidasSection(profile, dayLog));
 
   return wrap;
+}
+
+function renderExerciseCard(dayLog, target) {
+  const input = numberInput(dayLog.ejercicio || 0, v => { dayLog.ejercicio = v && v > 0 ? v : 0; persistLogs(); render(); }, 10, 0);
+  return el('div', { class: 'calc-box exercise-card' }, [
+    el('strong', {}, '🔥 Ejercicio de hoy'),
+    field('Calorías activas quemadas (kcal)', input),
+    el('p', { class: 'note' }, dayLog.ejercicio
+      ? `Sumadas a tu objetivo: hoy puedes comer ${fmt(target.kcal)} kcal.`
+      : 'Se suman a tu objetivo de calorías del día. Pon las "calorías activas" del Apple Watch.')
+  ]);
 }
 
 function shiftDate(delta) {
@@ -578,7 +625,7 @@ function renderCounterBoard(totals, target) {
 
 // ---------- Avisos ----------
 function checkWarnings(profile, mealKey, dayLogBefore, dayLogAfter) {
-  const target = getEffectiveTarget(profile);
+  const target = dayTargetFor(profile, dayLogAfter);
   if (!target) return;
   const before = dayTotals(dayLogBefore, profile);
   const after = dayTotals(dayLogAfter, profile);
@@ -1149,7 +1196,8 @@ function renderCalendario() {
       const hasEntries = [...LOG_BUCKETS, ...profile.extraMealSlots.map(s => s.id)].some(b => (dayLog[b] || []).length > 0);
       if (hasEntries) {
         loggedDays++;
-        const delta = target.kcal - t.kcal; // positivo = déficit
+        const dayTargetKcal = target.kcal + (dayLog.ejercicio || 0);
+        const delta = dayTargetKcal - t.kcal; // positivo = déficit
         monthDelta += delta;
         if (delta > 100) cls += ' cal-green';
         else if (delta < -100) cls += ' cal-red';
@@ -1157,7 +1205,7 @@ function renderCalendario() {
         const w = weeks[weekIndex];
         w.loggedDays++;
         w.actual.kcal += t.kcal; w.actual.prot += t.prot; w.actual.carb += t.carb; w.actual.fat += t.fat;
-        w.target.kcal += target.kcal; w.target.prot += target.prot; w.target.carb += target.carb; w.target.fat += target.fat;
+        w.target.kcal += dayTargetKcal; w.target.prot += target.prot; w.target.carb += target.carb; w.target.fat += target.fat;
       }
     }
     if (dateStr === todayISO()) cls += ' cal-today';
@@ -1695,4 +1743,5 @@ if ('serviceWorker' in navigator) {
 
 render();
 if (typeof initSync === 'function') initSync(applyRemoteChange);
-if (needsCloudPush) pushAllToCloud();
+if (typeof syncEnabled === 'undefined' || !syncEnabled) applyPendingExercise();
+else setTimeout(applyPendingExercise, 5000); // si la nube tarda o no hay conexión, se guarda en local igualmente

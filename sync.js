@@ -37,7 +37,7 @@ function initSync(onRemoteChange) {
     syncEnabled = true;
     setSyncBadge('syncing');
     syncDocRef.onSnapshot((snap) => {
-      if (!snap.exists) { setSyncBadge('ok'); return; }
+      if (!snap.exists) { setSyncBadge('ok'); onRemoteChange(null); return; }
       const data = snap.data();
       if (data._lastWriterTag === deviceTag) { setSyncBadge('ok'); return; }
       applyingRemote = true;
