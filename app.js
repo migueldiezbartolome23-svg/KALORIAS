@@ -436,7 +436,6 @@ function render() {
   else if (tab === 'calendario') root.appendChild(renderCalendario());
   else if (tab === 'alimentos') root.appendChild(renderAlimentos());
   else if (tab === 'comidas') root.appendChild(renderComidas());
-  root.appendChild(renderVersionFooter());
   renderRacionesFab();
 }
 
@@ -964,8 +963,46 @@ function renderAddEntryControls(profile, mealKey, onChange) {
       addEntry(profile, mealKey, { type: 'freeform', name, kcal, prot, carb, fat }, onChange);
     }
   }, '+ entrada libre (algo que no está en la lista)');
+  wrap.appendChild(el('button', { class: 'btn-secondary photo-add-btn', onclick: () => openPhotoAddModal(profile, mealKey, onChange) }, '📷 Foto de la etiqueta → añadir'));
   wrap.appendChild(freeBtn);
   return wrap;
+}
+
+// Foto de la tabla nutricional -> se lee y se añade directamente a la comida (solo hay que decir cuántos gramos)
+function openPhotoAddModal(profile, mealKey, onChange) {
+  openScanModal((vals) => {
+    openModal('Añadir desde la foto', (body, close) => {
+      const nameIn = el('input', { type: 'text', value: vals.name || '', placeholder: 'Nombre del producto' });
+      const gramsIn = el('input', { type: 'number', value: '100', min: '1', step: '1' });
+      const kcalIn = numberInput(vals.kcal ?? '', () => update());
+      const protIn = numberInput(vals.prot ?? '', () => update());
+      const carbIn = numberInput(vals.carb ?? '', () => update());
+      const fatIn = numberInput(vals.fat ?? '', () => update());
+      const preview = el('p', { class: 'ration-preview mono' });
+      function scaled() {
+        const f = (Number(gramsIn.value) || 0) / 100;
+        return { kcal: round1((Number(kcalIn.value) || 0) * f), prot: round1((Number(protIn.value) || 0) * f),
+                 carb: round1((Number(carbIn.value) || 0) * f), fat: round1((Number(fatIn.value) || 0) * f) };
+      }
+      function update() { const t = scaled(); preview.textContent = `Te comes: ${fmt(t.kcal)} kcal · ${fmt(t.prot)}P ${fmt(t.carb)}C ${fmt(t.fat)}G`; }
+      gramsIn.addEventListener('input', update);
+      body.appendChild(el('p', { class: 'note' }, 'Revisa los valores por 100 g (la lectura de la foto puede fallar) e indica cuántos gramos te vas a comer.'));
+      body.appendChild(field('Producto', nameIn));
+      body.appendChild(el('div', { class: 'form-grid' }, [field('Kcal /100g', kcalIn), field('Proteína', protIn), field('Carbohidratos', carbIn), field('Grasas', fatIn)]));
+      body.appendChild(field('Gramos que te comes', gramsIn));
+      body.appendChild(preview);
+      update();
+      body.appendChild(el('button', {
+        class: 'btn-primary', onclick: () => {
+          const t = scaled();
+          if (!t.kcal && !t.prot && !t.carb && !t.fat) { alertModal('Faltan datos', 'Rellena al menos las calorías por 100 g.'); return; }
+          const g = Number(gramsIn.value) || 0;
+          close();
+          addEntry(profile, mealKey, { type: 'freeform', name: `${(nameIn.value || 'Producto').trim()} (${fmt(g)} g)`, ...t }, onChange);
+        }
+      }, 'Añadir a ' + mealLabelFor(profile, mealKey).toLowerCase()));
+    });
+  });
 }
 
 // ---------- Bebidas ----------
@@ -1130,6 +1167,7 @@ function renderPerfil() {
   } else {
     wrap.appendChild(el('p', { class: 'note' }, 'Define primero un objetivo diario arriba para repartirlo entre las comidas.'));
   }
+  wrap.appendChild(renderVersionFooter());
   return wrap;
 }
 
@@ -1499,8 +1537,8 @@ function openScanModal(onExtracted) {
         previewBox.appendChild(el('div', { class: 'form-grid' }, [field('Kcal /100g', kcalIn), field('Proteína', protIn), field('Carbohidratos', carbIn), field('Grasas', fatIn)]));
         previewBox.appendChild(el('button', {
           class: 'btn-primary', onclick: () => {
-            onExtracted({ name: nameIn.value, kcal: kcalIn.value, prot: protIn.value, carb: carbIn.value, fat: fatIn.value });
             close();
+            onExtracted({ name: nameIn.value, kcal: kcalIn.value, prot: protIn.value, carb: carbIn.value, fat: fatIn.value });
           }
         }, 'Usar estos valores'));
       } catch (e) {
