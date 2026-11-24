@@ -1452,42 +1452,122 @@ function renderAlimentos() {
   return wrap;
 }
 
-// ---------- Escaneo de etiquetas (OCR gratuito, local) ----------
-function parseNutritionText(text) {
-  const lines = text.split('\n').map(l => l.toLowerCase().trim()).filter(Boolean);
-  const result = { kcal: null, prot: null, carb: null, fat: null };
-  function firstNumber(s) {
-    const m = s.match(/(\d+[.,]?\d*)/);
-    if (!m) return null;
-    return parseFloat(m[1].replace(',', '.'));
-  }
-  for (const line of lines) {
-    if (result.kcal === null && (line.includes('kcal') || line.includes('energ')) && !line.includes('kj')) {
-      const n = firstNumber(line);
-      if (n !== null && n < 3000) result.kcal = n;
-    }
-    if (result.prot === null && (line.includes('proteín') || line.includes('proteina'))) {
-      const n = firstNumber(line);
-      if (n !== null) result.prot = n;
-    }
-    if (result.carb === null && (line.includes('hidratos') || line.includes('carbohidratos') || line.includes('carbono')) && !line.includes('azúcar') && !line.includes('azucar')) {
-      const n = firstNumber(line);
-      if (n !== null) result.carb = n;
-    }
-    if (result.fat === null && line.includes('gras') && !line.includes('satura')) {
-      const n = firstNumber(line);
-      if (n !== null) result.fat = n;
-    }
-  }
-  return result;
-}
-
+// ---------- Escaneo de etiquetas (OCR gratuito, en el propio móvil) ----------
+// La lectura de los números está en nutrition.js (parseNutritionText).
 function guessProductName(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
   if (!lines.length) return '';
-  // primera línea "normal" (con letras, no solo números/símbolos)
   const candidate = lines.find(l => /[a-zA-ZÀ-ÿ]{3,}/.test(l)) || lines[0];
   return candidate.slice(0, 60);
+}
+
+// --- Preparación de la imagen: se amplía, se aplana la iluminación (sombras) y se sube el contraste ---
+async function loadImageBitmapFrom(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { /* sigue */ }
+  }
+  return await new Promise((res, rej) => {
+    const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(url); res(img); }; img.onerror = rej; img.src = url;
+  });
+}
+function grayFromCanvas(canvas) {
+  const ctx = canvas.getContext('2d'); const { width: w, height: h } = canvas;
+  const d = ctx.getImageData(0, 0, w, h).data; const g = new Uint8ClampedArray(w * h);
+  for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+  return { g, w, h };
+}
+function median3(src, w, h) {
+  const out = new Uint8ClampedArray(src.length); const win = new Array(9);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let k = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const yy = Math.min(h - 1, Math.max(0, y + dy)), xx = Math.min(w - 1, Math.max(0, x + dx));
+      win[k++] = src[yy * w + xx];
+    }
+    win.sort((p, q) => p - q); out[y * w + x] = win[4];
+  }
+  return out;
+}
+function boxBlurSmall(src, w, h, r) { // desenfoque por cajas (3 pasadas) sobre una imagen pequeña
+  let a = Float32Array.from(src), b = new Float32Array(src.length);
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < h; y++) { let acc = 0, cnt = 0; for (let x = -r; x <= r; x++) { const xx = Math.min(w - 1, Math.max(0, x)); acc += a[y * w + xx]; cnt++; }
+      for (let x = 0; x < w; x++) { b[y * w + x] = acc / cnt; const add = Math.min(w - 1, x + r + 1), rem = Math.max(0, x - r); acc += a[y * w + add] - a[y * w + rem]; } }
+    for (let x = 0; x < w; x++) { let acc = 0, cnt = 0; for (let y = -r; y <= r; y++) { const yy = Math.min(h - 1, Math.max(0, y)); acc += b[yy * w + x]; cnt++; }
+      for (let y = 0; y < h; y++) { a[y * w + x] = acc / cnt; const add = Math.min(h - 1, y + r + 1), rem = Math.max(0, y - r); acc += b[add * w + x] - b[rem * w + x]; } }
+  }
+  return a;
+}
+function flattenAndStretch(g, w, h) {
+  // fondo = imagen muy desenfocada; dividir por él quita degradados de luz y sombras
+  const sw = Math.max(8, Math.round(w / 16)), sh = Math.max(8, Math.round(h / 16));
+  const small = new Float32Array(sw * sh);
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    let acc = 0, n = 0; const x0 = Math.floor(x * w / sw), x1 = Math.floor((x + 1) * w / sw), y0 = Math.floor(y * h / sh), y1 = Math.floor((y + 1) * h / sh);
+    for (let yy = y0; yy < y1; yy += 2) for (let xx = x0; xx < x1; xx += 2) { acc += g[yy * w + xx]; n++; }
+    small[y * sw + x] = n ? acc / n : 255;
+  }
+  const bg = boxBlurSmall(small, sw, sh, Math.max(2, Math.round(sw / 8)));
+  const out = new Uint8ClampedArray(g.length);
+  for (let y = 0; y < h; y++) {
+    const fy = Math.min(sh - 1.001, y * sh / h), y0 = Math.floor(fy), ty = fy - y0;
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(sw - 1.001, x * sw / w), x0 = Math.floor(fx), tx = fx - x0;
+      const b = (bg[y0 * sw + x0] * (1 - tx) + bg[y0 * sw + x0 + 1] * tx) * (1 - ty) + (bg[(y0 + 1) * sw + x0] * (1 - tx) + bg[(y0 + 1) * sw + x0 + 1] * tx) * ty;
+      out[y * w + x] = Math.min(255, g[y * w + x] / Math.max(b, 1) * 200);
+    }
+  }
+  // estirar el contraste (percentiles 1 y 99)
+  const hist = new Uint32Array(256); for (let i = 0; i < out.length; i++) hist[out[i]]++;
+  let acc = 0, lo = 0, hi = 255; const t1 = out.length * 0.01, t2 = out.length * 0.99;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= t1) { lo = v; break; } }
+  acc = 0; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= t2) { hi = v; break; } }
+  const range = Math.max(hi - lo, 1);
+  for (let i = 0; i < out.length; i++) out[i] = Math.min(255, Math.max(0, (out[i] - lo) / range * 255));
+  return out;
+}
+function canvasFromGray(g, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); const img = ctx.createImageData(w, h);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) { img.data[j] = img.data[j + 1] = img.data[j + 2] = g[i]; img.data[j + 3] = 255; }
+  ctx.putImageData(img, 0, 0); return c;
+}
+// Devuelve la imagen preparada para cada tipo de pasada: 'm' (sin ruido + luz aplanada), 'f' (luz aplanada), 'o' (original ampliada)
+async function prepareImage(file, kind) {
+  const bmp = await loadImageBitmapFrom(file);
+  const bw = bmp.width || bmp.naturalWidth, bh = bmp.height || bmp.naturalHeight;
+  const scale = Math.min(3, Math.max(0.4, 1400 / bw));
+  const w = Math.round(bw * scale), h = Math.round(bh * scale);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(bmp, 0, 0, w, h);
+  if (kind === 'o') return c;
+  let { g } = grayFromCanvas(c);
+  if (kind === 'm') g = median3(g, w, h);
+  return canvasFromGray(flattenAndStretch(g, w, h), w, h);
+}
+
+// Lee una foto: hasta 3 pasadas (m, f, o); se detiene cuando una sale completa y cuadra con las calorías
+async function readNutritionFromPhoto(file, onStatus) {
+  let worker = null;
+  try {
+    worker = await Tesseract.createWorker('spa');
+    try { await worker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1', user_defined_dpi: '300' }); } catch (e) { /* opcional */ }
+  } catch (e) { worker = null; }
+  const recognize = async (canvas) => worker ? (await worker.recognize(canvas)).data.text : (await Tesseract.recognize(canvas, 'spa')).data.text;
+  let best = null; const order = ['m', 'f', 'o'];
+  try {
+    for (let i = 0; i < order.length; i++) {
+      onStatus(`Leyendo la tabla… (pasada ${i + 1} de hasta ${order.length})`);
+      const canvas = await prepareImage(file, order[i]);
+      const text = await recognize(canvas);
+      const r = parseNutritionText(text);
+      const rank = rankReading(r);
+      if (!best || rank > best.rank) best = { rank, r, text, canvas };
+      if (isReadingSolid(r)) break;
+    }
+  } finally { if (worker) { try { await worker.terminate(); } catch (e) { /* nada */ } } }
+  return best;
 }
 
 function openScanModal(onExtracted) {
@@ -1497,48 +1577,59 @@ function openScanModal(onExtracted) {
       body.appendChild(el('button', { class: 'btn-secondary', onclick: close }, 'Cerrar'));
       return;
     }
-    body.appendChild(el('p', { class: 'note' }, 'Haz una foto de la tabla de macros del envase (cuanto más recta y con buena luz, mejor). Si quieres, añade también una foto del envase para intentar sacar el nombre.'));
+    body.appendChild(el('p', { class: 'note' }, 'Haz una foto de la tabla nutricional: de frente, con buena luz y sin reflejos, y que ocupe casi toda la foto. Si quieres, añade otra del envase para sacar el nombre.'));
 
-    const nameFileIn = el('input', { type: 'file', accept: 'image/*', capture: 'environment' });
+    const nameFileIn = el('input', { type: 'file', accept: 'image/*' });
     const macrosFileIn = el('input', { type: 'file', accept: 'image/*', capture: 'environment' });
     const statusBox = el('p', { class: 'note mono' });
     const previewBox = el('div', {});
 
-    body.appendChild(field('Foto del envase (opcional, para el nombre)', nameFileIn));
     body.appendChild(field('Foto de la tabla de macros', macrosFileIn));
-    const goBtn = el('button', { class: 'btn-primary', onclick: runScan }, 'Analizar fotos');
+    body.appendChild(field('Foto del envase (opcional, para el nombre)', nameFileIn));
+    const goBtn = el('button', { class: 'btn-primary', onclick: runScan }, 'Analizar foto');
     body.appendChild(goBtn);
     body.appendChild(statusBox);
     body.appendChild(previewBox);
 
     async function runScan() {
       if (!macrosFileIn.files[0]) { statusBox.textContent = 'Falta la foto de la tabla de macros.'; return; }
-      goBtn.disabled = true;
-      previewBox.innerHTML = '';
+      goBtn.disabled = true; previewBox.innerHTML = '';
       try {
         let productName = '';
         if (nameFileIn.files[0]) {
           statusBox.textContent = 'Leyendo el envase…';
-          const r1 = await Tesseract.recognize(nameFileIn.files[0], 'spa');
-          productName = guessProductName(r1.data.text);
+          const t = await Tesseract.recognize(await prepareImage(nameFileIn.files[0], 'o'), 'spa');
+          productName = guessProductName(t.data.text);
         }
-        statusBox.textContent = 'Leyendo la tabla de macros…';
-        const r2 = await Tesseract.recognize(macrosFileIn.files[0], 'spa');
-        const vals = parseNutritionText(r2.data.text);
+        const best = await readNutritionFromPhoto(macrosFileIn.files[0], (m) => { statusBox.textContent = m; });
         statusBox.textContent = '';
+        const r = best.r;
+        const unc = new Set(r.uncertain || []);
 
-        const kcalIn = numberInput(vals.kcal, () => {});
-        const protIn = numberInput(vals.prot, () => {});
-        const carbIn = numberInput(vals.carb, () => {});
-        const fatIn = numberInput(vals.fat, () => {});
+        // la foto tal y como la "ve" el lector, para comparar con los números
+        const thumb = best.canvas.cloneNode(); thumb.width = best.canvas.width; thumb.height = best.canvas.height;
+        thumb.getContext('2d').drawImage(best.canvas, 0, 0);
+        thumb.className = 'scan-thumb'; thumb.style.cssText = 'width:100%;border-radius:10px;margin:8px 0;';
+        previewBox.appendChild(thumb);
+
+        if (r.warnings.length) previewBox.appendChild(el('div', { class: 'scan-warn' }, r.warnings.map(w => el('p', {}, '⚠️ ' + w))));
+        previewBox.appendChild(el('p', { class: 'note' }, 'Compara con la foto y corrige lo que haga falta antes de usarlo:'));
+
+        const mk = (v, k) => { const i = numberInput(v, () => {}); if (unc.has(k)) i.classList.add('field-uncertain'); return i; };
+        const kcalIn = mk(r.kcal, 'kcal'), protIn = mk(r.prot, 'prot'), carbIn = mk(r.carb, 'carb'), fatIn = mk(r.fat, 'fat');
+        const refIn = numberInput(r.refG || 100, () => {}, 1, 1);
         const nameIn = el('input', { type: 'text', value: productName });
-        previewBox.appendChild(el('p', { class: 'note' }, 'Revisa estos valores antes de usarlos — la lectura automática puede fallar:'));
         previewBox.appendChild(field('Nombre', nameIn));
-        previewBox.appendChild(el('div', { class: 'form-grid' }, [field('Kcal /100g', kcalIn), field('Proteína', protIn), field('Carbohidratos', carbIn), field('Grasas', fatIn)]));
+        previewBox.appendChild(el('div', { class: 'form-grid' }, [field('Kcal', kcalIn), field('Proteína (g)', protIn), field('Carbohidratos (g)', carbIn), field('Grasas (g)', fatIn)]));
+        previewBox.appendChild(field('Esos valores son para (g)', refIn));
+        previewBox.appendChild(el('p', { class: 'note' }, 'Normalmente 100 g. Si la tabla solo trae "por ración", pon aquí el peso de la ración y la app lo convierte a 100 g.'));
+        previewBox.appendChild(el('details', { class: 'scan-raw' }, [el('summary', {}, 'Ver el texto leído'), el('pre', {}, best.text)]));
         previewBox.appendChild(el('button', {
           class: 'btn-primary', onclick: () => {
+            const f = 100 / (Number(refIn.value) || 100);
+            const conv = (inp) => inp.value === '' ? '' : Math.round(Number(inp.value) * f * 10) / 10;
             close();
-            onExtracted({ name: nameIn.value, kcal: kcalIn.value, prot: protIn.value, carb: carbIn.value, fat: fatIn.value });
+            onExtracted({ name: nameIn.value, kcal: conv(kcalIn), prot: conv(protIn), carb: conv(carbIn), fat: conv(fatIn) });
           }
         }, 'Usar estos valores'));
       } catch (e) {

@@ -306,3 +306,10 @@ textarea { width: 100%; font: inherit; padding: 8px; border-radius: 10px; border
 .update-banner { position: fixed; left: 12px; right: 12px; top: calc(env(safe-area-inset-top, 0px) + 10px); z-index: 1000; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-radius: 14px; background: #fff; box-shadow: 0 6px 24px rgba(0,0,0,.25); font-weight: 600; }
 .update-banner .btn-primary { width: auto; padding: 8px 16px; margin: 0; }
 .version-footer { text-align: center; padding: 18px 0 90px; font-size: .75rem; }
+
+/* ---- lectura de etiquetas ---- */
+.field-uncertain { outline: 2px solid #E8913A; background: #FFF3E3; }
+.scan-warn { background: #FFF3E3; border-radius: 10px; padding: 6px 10px; margin: 6px 0; font-size: .8rem; }
+.scan-warn p { margin: 4px 0; }
+.scan-raw { margin: 8px 0; font-size: .75rem; }
+.scan-raw pre { white-space: pre-wrap; background: rgba(0,0,0,.05); padding: 8px; border-radius: 8px; max-height: 160px; overflow: auto; }
